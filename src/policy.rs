@@ -15,7 +15,7 @@ pub trait PolicyProvider: Send + Sync {
 
 /// Policy engine that maps namespaces to enforcement levels.
 pub struct PolicyEngine {
-    policies: HashMap<String, EnforcementPolicy>,
+    policies: std::sync::RwLock<HashMap<String, EnforcementPolicy>>,
     default_policy: EnforcementPolicy,
 }
 
@@ -24,33 +24,38 @@ impl PolicyEngine {
     #[must_use]
     pub fn new(default_policy: EnforcementPolicy) -> Self {
         Self {
-            policies: HashMap::new(),
+            policies: std::sync::RwLock::new(HashMap::new()),
             default_policy,
         }
     }
 
     /// Set the policy for a specific namespace.
-    pub fn set_policy(&mut self, namespace: &str, policy: EnforcementPolicy) {
-        self.policies.insert(namespace.to_string(), policy);
+    pub fn set_policy(&self, namespace: &str, policy: EnforcementPolicy) {
+        let mut policies = self.policies.write().expect("policy engine write lock");
+        policies.insert(namespace.to_string(), policy);
     }
 
     /// Remove the policy for a namespace (falls back to default).
-    pub fn remove_policy(&mut self, namespace: &str) {
-        self.policies.remove(namespace);
+    /// Returns `true` if the policy existed and was removed.
+    pub fn remove_policy(&self, namespace: &str) -> bool {
+        let mut policies = self.policies.write().expect("policy engine write lock");
+        policies.remove(namespace).is_some()
     }
 
     /// Get the number of configured namespace policies.
     #[inline]
     #[must_use]
     pub fn policy_count(&self) -> usize {
-        self.policies.len()
+        let policies = self.policies.read().expect("policy engine read lock");
+        policies.len()
     }
 }
 
 impl PolicyProvider for PolicyEngine {
     #[inline]
     fn get_policy(&self, namespace: &str) -> EnforcementPolicy {
-        self.policies
+        let policies = self.policies.read().expect("policy engine read lock");
+        policies
             .get(namespace)
             .copied()
             .unwrap_or(self.default_policy)
@@ -81,7 +86,7 @@ mod tests {
 
     #[test]
     fn namespace_override() {
-        let mut engine = PolicyEngine::new(EnforcementPolicy::Audit);
+        let engine = PolicyEngine::new(EnforcementPolicy::Audit);
         engine.set_policy("production", EnforcementPolicy::Enforce);
         assert!(engine.should_enforce("production"));
         assert!(engine.is_audit_only("staging"));
@@ -89,7 +94,7 @@ mod tests {
 
     #[test]
     fn remove_policy_falls_back() {
-        let mut engine = PolicyEngine::new(EnforcementPolicy::Audit);
+        let engine = PolicyEngine::new(EnforcementPolicy::Audit);
         engine.set_policy("ns", EnforcementPolicy::Enforce);
         assert!(engine.should_enforce("ns"));
         engine.remove_policy("ns");
@@ -98,7 +103,7 @@ mod tests {
 
     #[test]
     fn policy_count() {
-        let mut engine = PolicyEngine::new(EnforcementPolicy::Audit);
+        let engine = PolicyEngine::new(EnforcementPolicy::Audit);
         assert_eq!(engine.policy_count(), 0);
         engine.set_policy("a", EnforcementPolicy::Enforce);
         engine.set_policy("b", EnforcementPolicy::AllowUnknown);
@@ -107,9 +112,23 @@ mod tests {
 
     #[test]
     fn allow_unknown_policy() {
-        let mut engine = PolicyEngine::new(EnforcementPolicy::Enforce);
+        let engine = PolicyEngine::new(EnforcementPolicy::Enforce);
         engine.set_policy("dev", EnforcementPolicy::AllowUnknown);
         assert!(!engine.should_enforce("dev"));
         assert!(!engine.is_audit_only("dev"));
+    }
+
+    #[test]
+    fn remove_nonexistent_returns_false() {
+        let engine = PolicyEngine::new(EnforcementPolicy::Audit);
+        assert!(!engine.remove_policy("nonexistent"));
+    }
+
+    #[test]
+    fn remove_existing_returns_true() {
+        let engine = PolicyEngine::new(EnforcementPolicy::Audit);
+        engine.set_policy("ns", EnforcementPolicy::Enforce);
+        assert!(engine.remove_policy("ns"));
+        assert!(!engine.remove_policy("ns")); // second time returns false
     }
 }

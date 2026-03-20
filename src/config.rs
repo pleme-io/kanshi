@@ -64,6 +64,31 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Validate configuration values.
+    #[must_use]
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.map_config.allow_map_size == 0 {
+            errors.push("allow_map_size must be > 0".to_string());
+        }
+        if self.map_config.revocation_map_size == 0 {
+            errors.push("revocation_map_size must be > 0".to_string());
+        }
+        if self.map_config.policy_map_size == 0 {
+            errors.push("policy_map_size must be > 0".to_string());
+        }
+        let valid_policies = ["audit", "enforce", "allow_unknown"];
+        if !valid_policies.contains(&self.default_policy.as_str()) {
+            errors.push(format!(
+                "invalid default_policy: '{}' (expected: audit, enforce, allow_unknown)",
+                self.default_policy
+            ));
+        }
+        errors
+    }
+}
+
 /// BPF map size configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MapConfig {
@@ -151,5 +176,29 @@ mod tests {
         // Should succeed with defaults when no YAML/env exists
         let config = load();
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn validate_defaults_pass() {
+        let config = Config::default();
+        assert!(config.validate().is_empty());
+    }
+
+    #[test]
+    fn validate_zero_map_size_fails() {
+        let mut config = Config::default();
+        config.map_config.allow_map_size = 0;
+        let errors = config.validate();
+        assert!(!errors.is_empty());
+        assert!(errors[0].contains("allow_map_size"));
+    }
+
+    #[test]
+    fn validate_invalid_policy_fails() {
+        let mut config = Config::default();
+        config.default_policy = "invalid".to_string();
+        let errors = config.validate();
+        assert!(!errors.is_empty());
+        assert!(errors[0].contains("default_policy"));
     }
 }

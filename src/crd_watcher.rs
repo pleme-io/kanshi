@@ -44,6 +44,9 @@ pub struct SignatureGateRef {
     pub expected_signature: String,
     /// Per-layer BLAKE3 hashes (hex, optionally `blake3:` prefixed).
     pub layer_hashes: Vec<String>,
+    /// Optional CertificationArtifact composed roots (per-binary hashes).
+    #[serde(default)]
+    pub composed_roots: Vec<String>,
 }
 
 impl SignatureGateRef {
@@ -55,6 +58,7 @@ impl SignatureGateRef {
             namespace: gate.metadata.namespace.clone().unwrap_or_default(),
             expected_signature: gate.spec.expected_signature.clone(),
             layer_hashes: gate.spec.layer_hashes.clone(),
+            composed_roots: Vec::new(),
         }
     }
 }
@@ -99,6 +103,14 @@ impl<L: BpfLoader> CrdWatcher<L> {
             ),
         }
 
+        // Add certification artifact composed roots to allow map
+        for root_str in &gate.composed_roots {
+            match parse_bpf_hash(root_str) {
+                Ok(hash) => self.loader.allow_hash(&hash)?,
+                Err(e) => warn!(hash = %root_str, "Invalid composed root hash: {e}"),
+            }
+        }
+
         Ok(())
     }
 
@@ -119,6 +131,13 @@ impl<L: BpfLoader> CrdWatcher<L> {
 
         if let Ok(hash) = parse_bpf_hash(&gate.expected_signature) {
             self.loader.remove_hash(&hash)?;
+        }
+
+        // Remove certification artifact composed roots from allow map
+        for root_str in &gate.composed_roots {
+            if let Ok(hash) = parse_bpf_hash(root_str) {
+                self.loader.remove_hash(&hash)?;
+            }
         }
 
         Ok(())
@@ -244,6 +263,7 @@ mod tests {
             namespace: "production".to_string(),
             expected_signature: valid_hex(),
             layer_hashes: vec![valid_hex_2()],
+            composed_roots: vec![],
         };
 
         watcher.on_gate_applied(&gate).unwrap();
@@ -262,6 +282,7 @@ mod tests {
             namespace: "staging".to_string(),
             expected_signature: valid_hex(),
             layer_hashes: vec![valid_hex_2()],
+            composed_roots: vec![],
         };
 
         // First apply, then delete
@@ -282,6 +303,7 @@ mod tests {
             namespace: "dev".to_string(),
             expected_signature: valid_hex(),
             layer_hashes: vec!["tooshort".to_string(), valid_hex_2()],
+            composed_roots: vec![],
         };
 
         // Should succeed — invalid hashes are warned, not fatal
@@ -289,5 +311,101 @@ mod tests {
 
         // Only the valid layer hash + expected_signature should be added
         assert_eq!(loader.allow_count(), 2);
+    }
+
+    /// A third valid 64-char hex string (all `cc` bytes).
+    fn valid_hex_3() -> String {
+        "cc".repeat(32)
+    }
+
+    #[test]
+    fn crd_watcher_on_gate_applied_with_composed_roots() {
+        let loader = Arc::new(MockBpfLoader::new());
+        let watcher = CrdWatcher::new(Arc::clone(&loader));
+
+        let gate = SignatureGateRef {
+            name: "cert-gate".to_string(),
+            namespace: "production".to_string(),
+            expected_signature: valid_hex(),
+            layer_hashes: vec![valid_hex_2()],
+            composed_roots: vec![valid_hex_3()],
+        };
+
+        watcher.on_gate_applied(&gate).unwrap();
+
+        // expected_signature + 1 layer hash + 1 composed root = 3 entries
+        assert_eq!(loader.allow_count(), 3);
+    }
+
+    #[test]
+    fn crd_watcher_on_gate_deleted_removes_composed_roots() {
+        let loader = Arc::new(MockBpfLoader::new());
+        let watcher = CrdWatcher::new(Arc::clone(&loader));
+
+        let gate = SignatureGateRef {
+            name: "cert-gate".to_string(),
+            namespace: "staging".to_string(),
+            expected_signature: valid_hex(),
+            layer_hashes: vec![valid_hex_2()],
+            composed_roots: vec![valid_hex_3()],
+        };
+
+        watcher.on_gate_applied(&gate).unwrap();
+        assert_eq!(loader.allow_count(), 3);
+
+        watcher.on_gate_deleted(&gate).unwrap();
+        assert_eq!(loader.allow_count(), 0);
+    }
+
+    #[test]
+    fn crd_watcher_invalid_composed_root_is_skipped() {
+        let loader = Arc::new(MockBpfLoader::new());
+        let watcher = CrdWatcher::new(Arc::clone(&loader));
+
+        let gate = SignatureGateRef {
+            name: "bad-cert-gate".to_string(),
+            namespace: "dev".to_string(),
+            expected_signature: valid_hex(),
+            layer_hashes: vec![],
+            composed_roots: vec!["invalid-short".to_string(), valid_hex_2()],
+        };
+
+        watcher.on_gate_applied(&gate).unwrap();
+
+        // expected_signature + 1 valid composed root = 2 entries
+        // (invalid one is skipped with warning)
+        assert_eq!(loader.allow_count(), 2);
+    }
+
+    #[test]
+    fn crd_watcher_empty_composed_roots_backward_compat() {
+        let loader = Arc::new(MockBpfLoader::new());
+        let watcher = CrdWatcher::new(Arc::clone(&loader));
+
+        let gate = SignatureGateRef {
+            name: "old-gate".to_string(),
+            namespace: "production".to_string(),
+            expected_signature: valid_hex(),
+            layer_hashes: vec![valid_hex_2()],
+            composed_roots: vec![],
+        };
+
+        watcher.on_gate_applied(&gate).unwrap();
+
+        // expected_signature + 1 layer hash = 2 entries (no composed roots)
+        assert_eq!(loader.allow_count(), 2);
+    }
+
+    #[test]
+    fn signature_gate_ref_serde_without_composed_roots() {
+        // Deserialize JSON without composed_roots field — should default to empty
+        let json = r#"{
+            "name": "test",
+            "namespace": "default",
+            "expected_signature": "aaaa",
+            "layer_hashes": []
+        }"#;
+        let gate: SignatureGateRef = serde_json::from_str(json).unwrap();
+        assert!(gate.composed_roots.is_empty());
     }
 }

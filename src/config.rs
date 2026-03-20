@@ -27,7 +27,9 @@ impl Default for HeartbeatConfig {
     }
 }
 
+#[inline]
 fn default_emitter_type() -> String { "noop".to_string() }
+#[inline]
 fn default_heartbeat_path() -> String { "/var/log/kanshi/heartbeat.jsonl".to_string() }
 
 /// Kanshi daemon configuration.
@@ -86,14 +88,21 @@ impl Default for MapConfig {
     }
 }
 
+#[inline]
 fn default_health_addr() -> String { "0.0.0.0:8081".to_string() }
+#[inline]
 fn default_metrics_port() -> u16 { 9090 }
+#[inline]
 fn default_policy() -> String { "audit".to_string() }
+#[inline]
 fn default_allow_map_size() -> u32 { 1_048_576 } // 2^20
+#[inline]
 fn default_revocation_map_size() -> u32 { 65_536 } // 2^16
+#[inline]
 fn default_policy_map_size() -> u32 { 4_096 }
 
 /// Load kanshi configuration.
+#[must_use]
 pub fn load() -> crate::Result<Config> {
     load_config("KANSHI", &["kanshi.yaml", "/etc/kanshi/config.yaml"])
         .map_err(|e| crate::Error::Config(e.to_string()))

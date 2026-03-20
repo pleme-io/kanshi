@@ -3,6 +3,16 @@
 use kanshi_common::EnforcementPolicy;
 use std::collections::HashMap;
 
+/// Trait for policy lookup, enabling mock injection in tests.
+pub trait PolicyProvider: Send + Sync {
+    /// Get the effective policy for a namespace.
+    fn get_policy(&self, namespace: &str) -> EnforcementPolicy;
+    /// Check if a namespace should enforce (block) unattested binaries.
+    fn should_enforce(&self, namespace: &str) -> bool;
+    /// Check if a namespace is in audit-only mode.
+    fn is_audit_only(&self, namespace: &str) -> bool;
+}
+
 /// Policy engine that maps namespaces to enforcement levels.
 pub struct PolicyEngine {
     policies: HashMap<String, EnforcementPolicy>,
@@ -29,30 +39,30 @@ impl PolicyEngine {
         self.policies.remove(namespace);
     }
 
-    /// Get the effective policy for a namespace.
+    /// Get the number of configured namespace policies.
+    #[inline]
     #[must_use]
-    pub fn get_policy(&self, namespace: &str) -> EnforcementPolicy {
+    pub fn policy_count(&self) -> usize {
+        self.policies.len()
+    }
+}
+
+impl PolicyProvider for PolicyEngine {
+    #[inline]
+    fn get_policy(&self, namespace: &str) -> EnforcementPolicy {
         self.policies
             .get(namespace)
             .copied()
             .unwrap_or(self.default_policy)
     }
 
-    /// Get the number of configured namespace policies.
-    #[must_use]
-    pub fn policy_count(&self) -> usize {
-        self.policies.len()
-    }
-
-    /// Check if a namespace should enforce (block) unattested binaries.
-    #[must_use]
-    pub fn should_enforce(&self, namespace: &str) -> bool {
+    #[inline]
+    fn should_enforce(&self, namespace: &str) -> bool {
         self.get_policy(namespace) == EnforcementPolicy::Enforce
     }
 
-    /// Check if a namespace is in audit-only mode.
-    #[must_use]
-    pub fn is_audit_only(&self, namespace: &str) -> bool {
+    #[inline]
+    fn is_audit_only(&self, namespace: &str) -> bool {
         self.get_policy(namespace) == EnforcementPolicy::Audit
     }
 }

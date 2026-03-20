@@ -3,6 +3,16 @@
 use kanshi_common::BpfHash;
 use tameshi::hash::Blake3Hash;
 
+/// Trait for hash verification, enabling mock injection in tests.
+pub trait HashValidator: Send + Sync {
+    /// Verify whether an inode's hash is allowed and not revoked.
+    fn verify(&self, inode: u64, actual_hash: &BpfHash) -> VerifyResult;
+    /// Get the number of entries in the allow map.
+    fn allow_count(&self) -> usize;
+    /// Get the number of entries in the revocation list.
+    fn revocation_count(&self) -> usize;
+}
+
 /// Verifier that checks binary hashes against the allow map.
 pub struct HashVerifier {
     allow_map: std::collections::HashMap<u64, BpfHash>,
@@ -39,9 +49,17 @@ impl HashVerifier {
         self.revocation_map.remove(hash);
     }
 
-    /// Verify whether an inode's hash is allowed and not revoked.
+    /// Convert a tameshi `Blake3Hash` to a `BpfHash`.
+    #[inline]
     #[must_use]
-    pub fn verify(&self, inode: u64, actual_hash: &BpfHash) -> VerifyResult {
+    pub fn to_bpf_hash(hash: &Blake3Hash) -> BpfHash {
+        BpfHash::new(hash.0)
+    }
+}
+
+impl HashValidator for HashVerifier {
+    #[inline]
+    fn verify(&self, inode: u64, actual_hash: &BpfHash) -> VerifyResult {
         let Some(expected) = self.allow_map.get(&inode) else {
             return VerifyResult::Unknown;
         };
@@ -57,22 +75,14 @@ impl HashVerifier {
         VerifyResult::Allowed
     }
 
-    /// Get the number of entries in the allow map.
-    #[must_use]
-    pub fn allow_count(&self) -> usize {
+    #[inline]
+    fn allow_count(&self) -> usize {
         self.allow_map.len()
     }
 
-    /// Get the number of entries in the revocation list.
-    #[must_use]
-    pub fn revocation_count(&self) -> usize {
+    #[inline]
+    fn revocation_count(&self) -> usize {
         self.revocation_map.len()
-    }
-
-    /// Convert a tameshi `Blake3Hash` to a `BpfHash`.
-    #[must_use]
-    pub fn to_bpf_hash(hash: &Blake3Hash) -> BpfHash {
-        BpfHash::new(hash.0)
     }
 }
 

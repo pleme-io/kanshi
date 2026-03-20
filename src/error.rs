@@ -34,6 +34,9 @@ pub enum Error {
     #[error("tameshi error: {0}")]
     Tameshi(#[from] tameshi::error::TameshiError),
 
+    #[error("invalid hash: {0}")]
+    InvalidHash(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -74,6 +77,7 @@ impl Error {
             Error::Io(_) => "io",
             Error::Serialization(_) => "serialization",
             Error::Tameshi(_) => "tameshi",
+            Error::InvalidHash(_) => "hash",
             Error::Internal(_) => "internal",
         }
     }

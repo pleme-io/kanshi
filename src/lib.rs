@@ -19,7 +19,9 @@
 //! └───────────────────────┘
 //! ```
 
+pub mod bpf_loader;
 pub mod config;
+pub mod crd_watcher;
 pub mod error;
 pub mod health;
 pub mod metrics;

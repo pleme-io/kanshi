@@ -1,0 +1,17 @@
+[workspace]
+
+[package]
+name = "kanshi-ebpf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+license = "MIT"
+description = "eBPF LSM programs for kanshi runtime binary verification"
+
+[dependencies]
+# aya-bpf dependencies are Linux-only and require special toolchain
+# These are documented but not added as cargo deps to allow macOS development
+# Build with: cargo +nightly build --target bpfel-unknown-none -Z build-std=core
+
+[features]
+default = []

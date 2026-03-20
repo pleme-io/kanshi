@@ -1,0 +1,1 @@
+{"rustc":768609383501889853,"features":"[\"default\"]","declared_features":"[\"default\"]","target":16139786862974193616,"profile":2330448797067240312,"path":4942398508502643691,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug/.fingerprint/kanshi-ebpf-04acb3e20b58380a/dep-bin-kanshi-ebpf","checksum":false}}],"rustflags":[],"config":2069994364910194474,"compile_kind":0}

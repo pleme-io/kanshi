@@ -66,6 +66,44 @@ pub trait BpfLoader: Send + Sync {
     fn revocation_count(&self) -> usize;
 }
 
+/// Real aya-based BPF program loader.
+///
+/// Loads the compiled eBPF object, attaches LSM hooks, and provides
+/// typed access to BPF maps for hash verification.
+///
+/// Only available on Linux (requires kernel BTF support).
+#[cfg(target_os = "linux")]
+pub struct AyaBpfLoader {
+    // Will hold aya::Ebpf when aya is added as dependency
+    loaded: bool,
+    // Placeholder — real impl loads from include_bytes_aligned!
+}
+
+#[cfg(target_os = "linux")]
+impl AyaBpfLoader {
+    /// Create a new unloaded aya BPF loader.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { loaded: false }
+    }
+
+    /// Check whether the BPF programs have been loaded.
+    #[must_use]
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Default for AyaBpfLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Note: BpfLoader impl for AyaBpfLoader will be added when aya dependency
+// is integrated. For now this is a compile-time placeholder.
+
 /// Mock BPF loader for testing and macOS development.
 ///
 /// Stores all map data in-memory behind `Mutex` locks so it can be

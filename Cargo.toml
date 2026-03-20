@@ -18,7 +18,7 @@ repository = "https://github.com/pleme-io/kanshi"
 kanshi-common = { path = "kanshi-common" }
 
 # Core integrity library
-tameshi = { git = "https://github.com/pleme-io/tameshi" }
+tameshi = { path = "../tameshi" }
 
 # Async runtime
 tokio = { version = "1.50", features = ["full"] }

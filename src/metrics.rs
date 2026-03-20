@@ -17,10 +17,30 @@ pub struct RevocationLabels {
     pub hash: String,
 }
 
+/// Labels for blocked execution events.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, prometheus_client::encoding::EncodeLabelSet)]
+pub struct BlockedExecutionLabels {
+    /// Reason for blocking: "not_in_allow_map", "hash_mismatch", "revoked", "unknown".
+    pub reason: String,
+    /// Binary path (truncated to 128 chars to control cardinality).
+    pub binary_path: String,
+}
+
+/// Truncate a binary path to at most 128 characters, prepending "..." if shortened.
+#[must_use]
+pub fn truncate_path(path: &str) -> String {
+    if path.len() > 128 {
+        format!("...{}", &path[path.len() - 125..])
+    } else {
+        path.to_string()
+    }
+}
+
 pub struct KanshiMetrics {
     registry: Mutex<Registry>,
     verifications_total: Family<VerificationLabels, Counter>,
     revocations_total: Family<RevocationLabels, Counter>,
+    blocked_executions_total: Family<BlockedExecutionLabels, Counter>,
 }
 
 impl KanshiMetrics {
@@ -31,7 +51,18 @@ impl KanshiMetrics {
         registry.register("kanshi_verifications_total", "Total binary verifications", verifications_total.clone());
         let revocations_total = Family::<RevocationLabels, Counter>::default();
         registry.register("kanshi_revocations_total", "Total revocation events", revocations_total.clone());
-        Self { registry: Mutex::new(registry), verifications_total, revocations_total }
+        let blocked_executions_total = Family::<BlockedExecutionLabels, Counter>::default();
+        registry.register(
+            "tameshi_blocked_executions_total",
+            "Total blocked binary executions",
+            blocked_executions_total.clone(),
+        );
+        Self {
+            registry: Mutex::new(registry),
+            verifications_total,
+            revocations_total,
+            blocked_executions_total,
+        }
     }
 
     pub fn record_verification(&self, namespace: &str, allowed: bool) {
@@ -46,6 +77,16 @@ impl KanshiMetrics {
     pub fn record_revocation(&self, hash: &str) {
         self.revocations_total
             .get_or_create(&RevocationLabels { hash: hash.to_string() })
+            .inc();
+    }
+
+    /// Record a blocked binary execution with the given reason and binary path.
+    pub fn record_blocked_execution(&self, reason: &str, binary_path: &str) {
+        self.blocked_executions_total
+            .get_or_create(&BlockedExecutionLabels {
+                reason: reason.to_string(),
+                binary_path: truncate_path(binary_path),
+            })
             .inc();
     }
 
@@ -68,6 +109,11 @@ pub fn init() { let _ = &*METRICS; }
 pub fn gather() -> String { METRICS.encode() }
 pub fn record_verification(namespace: &str, allowed: bool) { METRICS.record_verification(namespace, allowed); }
 pub fn record_revocation(hash: &str) { METRICS.record_revocation(hash); }
+
+/// Record a blocked binary execution event in the global metrics.
+pub fn record_blocked_execution(reason: &str, binary_path: &str) {
+    METRICS.record_blocked_execution(reason, binary_path);
+}
 
 #[cfg(test)]
 mod tests {
@@ -96,5 +142,70 @@ mod tests {
         record_verification("ns", true);
         record_revocation("hash");
         let _ = gather();
+    }
+
+    #[test]
+    fn blocked_execution_increments_counter() {
+        let m = KanshiMetrics::new();
+        m.record_blocked_execution("not_in_allow_map", "/usr/bin/evil");
+        let output = m.encode();
+        assert!(output.contains("tameshi_blocked_executions_total"));
+    }
+
+    #[test]
+    fn blocked_execution_different_reasons_separate_labels() {
+        let m = KanshiMetrics::new();
+        m.record_blocked_execution("not_in_allow_map", "/usr/bin/a");
+        m.record_blocked_execution("hash_mismatch", "/usr/bin/b");
+        m.record_blocked_execution("revoked", "/usr/bin/c");
+        m.record_blocked_execution("unknown", "/usr/bin/d");
+        let output = m.encode();
+        assert!(output.contains("not_in_allow_map"));
+        assert!(output.contains("hash_mismatch"));
+        assert!(output.contains("revoked"));
+        assert!(output.contains("unknown"));
+    }
+
+    #[test]
+    fn blocked_execution_path_truncation() {
+        let long_path = "/".to_string() + &"a".repeat(200);
+        let truncated = truncate_path(&long_path);
+        assert!(truncated.len() <= 128);
+        assert!(truncated.starts_with("..."));
+
+        let short_path = "/usr/bin/test";
+        assert_eq!(truncate_path(short_path), short_path);
+
+        let exactly_128 = "x".repeat(128);
+        assert_eq!(truncate_path(&exactly_128), exactly_128);
+    }
+
+    #[test]
+    fn blocked_execution_multiple_accumulate() {
+        let m = KanshiMetrics::new();
+        m.record_blocked_execution("revoked", "/usr/bin/evil");
+        m.record_blocked_execution("revoked", "/usr/bin/evil");
+        m.record_blocked_execution("revoked", "/usr/bin/evil");
+        let output = m.encode();
+        // The counter should show 3 total for this label set
+        assert!(output.contains("tameshi_blocked_executions_total"));
+    }
+
+    #[test]
+    fn blocked_execution_labels_equality() {
+        let a = BlockedExecutionLabels {
+            reason: "revoked".to_string(),
+            binary_path: "/usr/bin/evil".to_string(),
+        };
+        let b = BlockedExecutionLabels {
+            reason: "revoked".to_string(),
+            binary_path: "/usr/bin/evil".to_string(),
+        };
+        let c = BlockedExecutionLabels {
+            reason: "hash_mismatch".to_string(),
+            binary_path: "/usr/bin/evil".to_string(),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }

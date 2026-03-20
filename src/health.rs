@@ -67,12 +67,28 @@ pub struct HealthState<L: BpfLoader> {
 }
 
 /// Create the health check router backed by real BPF loader state.
+///
+/// Exposes `/healthz`, `/readyz`, and `/metrics` endpoints.
 #[must_use]
 pub fn health_router<L: BpfLoader + 'static>(state: Arc<HealthState<L>>) -> Router {
     Router::new()
         .route("/healthz", get(healthz::<L>))
         .route("/readyz", get(readyz::<L>))
+        .route("/metrics", get(metrics_handler))
         .with_state(state)
+}
+
+/// GET /metrics -- Prometheus metrics endpoint.
+///
+/// Returns all registered Prometheus metrics in the text exposition format.
+#[allow(clippy::unused_async)]
+async fn metrics_handler() -> impl IntoResponse {
+    let body = crate::metrics::gather();
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
 }
 
 /// GET /healthz -- liveness probe.
@@ -249,5 +265,41 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_200() {
+        let state = make_state(true, 1);
+        let app = health_router(state);
+        let req = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_response_contains_blocked_executions_counter() {
+        // Record a blocked execution so the counter is guaranteed to appear.
+        crate::metrics::record_blocked_execution("revoked", "/usr/bin/test");
+
+        let state = make_state(true, 1);
+        let app = health_router(state);
+        let req = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            text.contains("tameshi_blocked_executions_total"),
+            "metrics response should contain tameshi_blocked_executions_total"
+        );
     }
 }

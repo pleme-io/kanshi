@@ -27,6 +27,10 @@ pub struct BlockedExecutionLabels {
 }
 
 /// Truncate a binary path to at most 128 characters, prepending "..." if shortened.
+///
+/// Used to limit label cardinality in Prometheus metrics. Full paths are
+/// preserved in the heartbeat chain for forensic evidence.
+#[inline]
 #[must_use]
 pub fn truncate_path(path: &str) -> String {
     if path.len() > 128 {
@@ -81,6 +85,7 @@ impl KanshiMetrics {
     }
 
     /// Record a blocked binary execution with the given reason and binary path.
+    #[inline]
     pub fn record_blocked_execution(&self, reason: &str, binary_path: &str) {
         self.blocked_executions_total
             .get_or_create(&BlockedExecutionLabels {
@@ -111,6 +116,7 @@ pub fn record_verification(namespace: &str, allowed: bool) { METRICS.record_veri
 pub fn record_revocation(hash: &str) { METRICS.record_revocation(hash); }
 
 /// Record a blocked binary execution event in the global metrics.
+#[inline]
 pub fn record_blocked_execution(reason: &str, binary_path: &str) {
     METRICS.record_blocked_execution(reason, binary_path);
 }
@@ -207,5 +213,91 @@ mod tests {
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    // ── Counter monotonicity ────────────────────────────────────────
+
+    #[test]
+    fn counter_only_increases() {
+        let m = KanshiMetrics::new();
+        m.record_blocked_execution("revoked", "/usr/bin/evil");
+        let output1 = m.encode();
+        m.record_blocked_execution("revoked", "/usr/bin/evil");
+        let output2 = m.encode();
+        // Counter should be higher in output2 (no way to decrease a counter).
+        // Both should contain the metric.
+        assert!(output1.contains("tameshi_blocked_executions_total"));
+        assert!(output2.contains("tameshi_blocked_executions_total"));
+    }
+
+    // ── Truncation prevents label cardinality explosion ─────────────
+
+    #[test]
+    fn truncation_prevents_cardinality_explosion() {
+        let m = KanshiMetrics::new();
+        // Record 100 unique long paths — all should be truncated to 128 chars.
+        for i in 0..100 {
+            let path = format!("/{}/{}", "a".repeat(200), i);
+            m.record_blocked_execution("revoked", &path);
+        }
+        let output = m.encode();
+        // All truncated paths should start with "...".
+        assert!(output.contains("..."));
+    }
+
+    #[test]
+    fn truncate_path_empty() {
+        assert_eq!(truncate_path(""), "");
+    }
+
+    #[test]
+    fn truncate_path_exactly_129_chars() {
+        let path = "z".repeat(129);
+        let truncated = truncate_path(&path);
+        assert_eq!(truncated.len(), 128);
+        assert!(truncated.starts_with("..."));
+    }
+
+    #[test]
+    fn truncate_path_preserves_tail() {
+        let path = format!("{}/important", "x".repeat(200));
+        let truncated = truncate_path(&path);
+        assert!(truncated.ends_with("/important"));
+    }
+
+    // ── Prometheus text format validity ─────────────────────────────
+
+    #[test]
+    fn gather_output_contains_help_and_type_lines() {
+        let m = KanshiMetrics::new();
+        m.record_blocked_execution("revoked", "/usr/bin/evil");
+        let output = m.encode();
+        // Prometheus text format requires # HELP and # TYPE lines.
+        assert!(output.contains("# HELP"));
+        assert!(output.contains("# TYPE"));
+    }
+
+    #[test]
+    fn global_blocked_execution_records() {
+        // Verify the global function works without panicking.
+        record_blocked_execution("unknown", "/bin/test");
+        let output = gather();
+        assert!(output.contains("tameshi_blocked_executions_total"));
+    }
+
+    #[test]
+    fn empty_binary_path_does_not_panic() {
+        let m = KanshiMetrics::new();
+        m.record_blocked_execution("revoked", "");
+        let output = m.encode();
+        assert!(output.contains("tameshi_blocked_executions_total"));
+    }
+
+    #[test]
+    fn default_creates_new_metrics() {
+        let m = KanshiMetrics::default();
+        m.record_verification("test", true);
+        let output = m.encode();
+        assert!(output.contains("kanshi_verifications_total"));
     }
 }

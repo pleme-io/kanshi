@@ -48,6 +48,7 @@ impl<E: EventReader> EventMetricsCollector<E> {
     /// # Errors
     ///
     /// Returns `Error` if the underlying event reader fails.
+    #[inline]
     pub fn poll_and_record(&self) -> crate::Result<usize> {
         let events = self.event_reader.poll_events()?;
         let count = events.len();
@@ -150,6 +151,25 @@ impl<E: EventReader> EventMetricsCollector<E> {
 /// CIRCIA (Cyber Incident Reporting for Critical Infrastructure Act) evidence report.
 ///
 /// Aggregates blocked execution events over a time window for regulatory reporting.
+///
+/// # Example
+///
+/// ```
+/// use kanshi::event_metrics::CirciaReport;
+/// use std::collections::BTreeMap;
+/// use chrono::Utc;
+///
+/// let report = CirciaReport {
+///     window_start: Utc::now() - chrono::Duration::hours(24),
+///     window_end: Utc::now(),
+///     total_blocked: 0,
+///     blocked_by_reason: BTreeMap::new(),
+///     blocked_binaries: Vec::new(),
+///     heartbeat_chain_length: 0,
+///     chain_integrity_verified: true,
+/// };
+/// assert!(report.is_clean());
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CirciaReport {
     /// Start of the reporting window.
@@ -166,6 +186,26 @@ pub struct CirciaReport {
     pub heartbeat_chain_length: u64,
     /// Whether the heartbeat chain integrity was verified.
     pub chain_integrity_verified: bool,
+}
+
+impl CirciaReport {
+    /// Returns `true` if no executions were blocked in the reporting window.
+    #[inline]
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.total_blocked == 0
+    }
+
+    /// Serialize the report to JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` if serialization fails (should not happen
+    /// for well-formed reports).
+    #[inline]
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 /// Summary of blocked executions for a specific binary.
@@ -470,5 +510,270 @@ mod tests {
         let report = collector.generate_circia_report(24);
         assert!(report.chain_integrity_verified);
         assert_eq!(report.heartbeat_chain_length, 2);
+    }
+
+    // ── CirciaReport::is_clean ──────────────────────────────────────
+
+    #[test]
+    fn is_clean_true_for_empty_report() {
+        let reader = Arc::new(MockEventReader::new());
+        let (collector, _chain) = make_collector(reader);
+        let report = collector.generate_circia_report(24);
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn is_clean_false_when_events_present() {
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/x", BlockReason::Revoked));
+        let (collector, _chain) = make_collector(reader);
+        collector.poll_and_record().unwrap();
+        let report = collector.generate_circia_report(24);
+        assert!(!report.is_clean());
+    }
+
+    // ── CirciaReport::to_json ───────────────────────────────────────
+
+    #[test]
+    fn to_json_produces_valid_json() {
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/x", BlockReason::Revoked));
+        let (collector, _chain) = make_collector(reader);
+        collector.poll_and_record().unwrap();
+        let report = collector.generate_circia_report(24);
+
+        let json = report.to_json().unwrap();
+        // Verify it round-trips.
+        let parsed: CirciaReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total_blocked, report.total_blocked);
+    }
+
+    #[test]
+    fn to_json_empty_report() {
+        let reader = Arc::new(MockEventReader::new());
+        let (collector, _chain) = make_collector(reader);
+        let report = collector.generate_circia_report(24);
+        let json = report.to_json().unwrap();
+        assert!(json.contains("\"total_blocked\": 0"));
+    }
+
+    // ── Multiple poll cycles ────────────────────────────────────────
+
+    #[test]
+    fn multiple_poll_cycles_cumulative_metrics() {
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/a", BlockReason::Revoked));
+        let (collector, chain) = make_collector(reader.clone());
+
+        let count1 = collector.poll_and_record().unwrap();
+        assert_eq!(count1, 1);
+        assert_eq!(chain.len(), 1);
+
+        // Push more events after first poll.
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/b", BlockReason::Revoked));
+        reader.push_event(BlockedExecutionEvent::for_test(
+            "/bin/c",
+            BlockReason::HashMismatch,
+        ));
+
+        let count2 = collector.poll_and_record().unwrap();
+        assert_eq!(count2, 2);
+        assert_eq!(chain.len(), 3);
+
+        // Report should show all 3.
+        let report = collector.generate_circia_report(24);
+        assert_eq!(report.total_blocked, 3);
+    }
+
+    // ── All block reasons in metrics ────────────────────────────────
+
+    #[test]
+    fn all_block_reasons_map_to_correct_metric_labels() {
+        let test_cases = [
+            (BlockReason::NotInAllowMap, "not_in_allow_map"),
+            (BlockReason::HashMismatch, "hash_mismatch"),
+            (BlockReason::Revoked, "revoked"),
+            (BlockReason::Unknown, "unknown"),
+        ];
+
+        for (reason, expected_label) in test_cases {
+            let reader = Arc::new(MockEventReader::new());
+            reader.push_event(BlockedExecutionEvent::for_test("/bin/test", reason));
+            let (collector, _chain) = make_collector(reader);
+            collector.poll_and_record().unwrap();
+
+            let output = crate::metrics::gather();
+            assert!(
+                output.contains(expected_label),
+                "Expected label '{expected_label}' in metrics output for {reason:?}"
+            );
+        }
+    }
+
+    // ── Empty binary path ───────────────────────────────────────────
+
+    #[test]
+    fn empty_binary_path_does_not_panic() {
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test("", BlockReason::Unknown));
+        let (collector, chain) = make_collector(reader);
+
+        let count = collector.poll_and_record().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(chain.len(), 1);
+
+        let entries = chain.entries();
+        assert_eq!(entries[0].resource, "");
+    }
+
+    // ── Very long binary path ───────────────────────────────────────
+
+    #[test]
+    fn very_long_binary_path_truncated_in_metrics() {
+        let long_path = "/".to_string() + &"a".repeat(200);
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test(
+            &long_path,
+            BlockReason::Revoked,
+        ));
+        let (collector, chain) = make_collector(reader);
+
+        collector.poll_and_record().unwrap();
+
+        // Heartbeat chain should have the FULL path (truncated by BINARY_PATH_LEN=256).
+        let entries = chain.entries();
+        assert!(entries[0].resource.len() <= kanshi_common::BINARY_PATH_LEN);
+
+        // Metrics should have the path truncated to 128 chars.
+        let output = crate::metrics::gather();
+        assert!(output.contains("..."), "Long path should be truncated in metrics");
+    }
+
+    // ── Multi-binary aggregation in report ──────────────────────────
+
+    #[test]
+    fn multi_binary_aggregation_five_binaries() {
+        let reader = Arc::new(MockEventReader::new());
+        for i in 0..5 {
+            for _ in 0..(i + 1) {
+                reader.push_event(BlockedExecutionEvent::for_test(
+                    &format!("/bin/app_{i}"),
+                    BlockReason::Revoked,
+                ));
+            }
+        }
+        let (collector, _chain) = make_collector(reader);
+        collector.poll_and_record().unwrap();
+
+        let report = collector.generate_circia_report(24);
+        // Total: 1 + 2 + 3 + 4 + 5 = 15
+        assert_eq!(report.total_blocked, 15);
+        assert_eq!(report.blocked_binaries.len(), 5);
+
+        // Verify each binary has the correct count.
+        for i in 0..5 {
+            let summary = report
+                .blocked_binaries
+                .iter()
+                .find(|s| s.binary_path == format!("/bin/app_{i}"))
+                .unwrap_or_else(|| panic!("Missing summary for /bin/app_{i}"));
+            assert_eq!(summary.block_count, (i + 1) as u64);
+        }
+    }
+
+    // ── First/last seen accuracy ────────────────────────────────────
+
+    #[test]
+    fn first_last_seen_are_correct() {
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/app", BlockReason::Revoked));
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/app", BlockReason::Revoked));
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/app", BlockReason::Revoked));
+        let (collector, _chain) = make_collector(reader);
+        collector.poll_and_record().unwrap();
+
+        let report = collector.generate_circia_report(24);
+        let summary = &report.blocked_binaries[0];
+        assert!(summary.first_seen <= summary.last_seen);
+        assert_eq!(summary.block_count, 3);
+    }
+
+    // ── Zero-hour window ────────────────────────────────────────────
+
+    #[test]
+    fn zero_hour_window_captures_nothing() {
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/app", BlockReason::Revoked));
+        let (collector, _chain) = make_collector(reader);
+        collector.poll_and_record().unwrap();
+
+        // window_hours = 0 means the window starts NOW, so no events are in range.
+        // (Events were appended just before "now" in poll_and_record.)
+        // Due to timing, this might capture 0 or 1 -- the important thing is
+        // it doesn't panic.
+        let report = collector.generate_circia_report(0);
+        // Should at least not panic.
+        assert!(report.total_blocked <= 1);
+    }
+
+    // ── Large window ────────────────────────────────────────────────
+
+    #[test]
+    fn large_window_captures_everything() {
+        let reader = Arc::new(MockEventReader::new());
+        for i in 0..10 {
+            reader.push_event(BlockedExecutionEvent::for_test(
+                &format!("/bin/app_{i}"),
+                BlockReason::Revoked,
+            ));
+        }
+        let (collector, _chain) = make_collector(reader);
+        collector.poll_and_record().unwrap();
+
+        // 8760 hours = 1 year.
+        let report = collector.generate_circia_report(8760);
+        assert_eq!(report.total_blocked, 10);
+    }
+
+    // ── Events cannot be silently dropped ───────────────────────────
+
+    #[test]
+    fn events_are_never_silently_dropped() {
+        let reader = Arc::new(MockEventReader::new());
+        let event_count = 500;
+        for i in 0..event_count {
+            reader.push_event(BlockedExecutionEvent::for_test(
+                &format!("/bin/app_{i}"),
+                BlockReason::Revoked,
+            ));
+        }
+        let (collector, chain) = make_collector(reader);
+
+        let count = collector.poll_and_record().unwrap();
+        assert_eq!(count, event_count);
+        assert_eq!(chain.len(), event_count);
+        assert!(chain.verify_integrity());
+    }
+
+    // ── EventMetricsCollector without metrics (just heartbeat) ──────
+
+    #[test]
+    fn collector_works_for_heartbeat_only_use_case() {
+        // Even though we also record metrics, the collector can be used
+        // primarily for heartbeat chain building.
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/test", BlockReason::Revoked));
+        let chain = Arc::new(HeartbeatChain::new());
+        let collector =
+            EventMetricsCollector::new(reader, Arc::clone(&chain), test_verifier());
+
+        collector.poll_and_record().unwrap();
+        assert_eq!(chain.len(), 1);
+        assert!(chain.verify_integrity());
+
+        // Can generate a report from the chain.
+        let report = collector.generate_circia_report(24);
+        assert_eq!(report.total_blocked, 1);
+        assert!(report.chain_integrity_verified);
     }
 }

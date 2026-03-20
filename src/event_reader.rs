@@ -244,4 +244,140 @@ mod tests {
             assert_eq!(resource, "/bin/test");
         }
     }
+
+    // ── Concurrent access tests ─────────────────────────────────────
+
+    #[test]
+    fn mock_event_reader_concurrent_push_and_poll() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let reader = Arc::new(MockEventReader::new());
+
+        // Spawn a thread that pushes events.
+        let writer = Arc::clone(&reader);
+        let handle = thread::spawn(move || {
+            for i in 0..100 {
+                let path = format!("/bin/concurrent_{i}");
+                writer.push_event(BlockedExecutionEvent::for_test(
+                    &path,
+                    BlockReason::Revoked,
+                ));
+            }
+        });
+
+        // Wait for writer to finish.
+        handle.join().unwrap();
+
+        // All 100 events should be available.
+        let events = reader.poll_events().unwrap();
+        assert_eq!(events.len(), 100);
+    }
+
+    #[test]
+    fn mock_event_reader_large_batch_10000_events() {
+        let events: Vec<BlockedExecutionEvent> = (0..10_000)
+            .map(|i| {
+                BlockedExecutionEvent::for_test(
+                    &format!("/bin/batch_{i}"),
+                    BlockReason::NotInAllowMap,
+                )
+            })
+            .collect();
+        let reader = MockEventReader::with_events(events);
+        assert_eq!(reader.pending_count(), 10_000);
+
+        let polled = reader.poll_events().unwrap();
+        assert_eq!(polled.len(), 10_000);
+        assert_eq!(reader.pending_count(), 0);
+    }
+
+    #[test]
+    fn mock_event_reader_poll_after_poll_returns_empty() {
+        let reader = MockEventReader::with_events(vec![
+            BlockedExecutionEvent::for_test("/bin/a", BlockReason::Revoked),
+            BlockedExecutionEvent::for_test("/bin/b", BlockReason::Revoked),
+        ]);
+
+        let first = reader.poll_events().unwrap();
+        assert_eq!(first.len(), 2);
+
+        let second = reader.poll_events().unwrap();
+        assert!(second.is_empty());
+
+        let third = reader.poll_events().unwrap();
+        assert!(third.is_empty());
+    }
+
+    #[test]
+    fn mock_event_reader_behind_arc_works() {
+        use std::sync::Arc;
+
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test(
+            "/bin/arc_test",
+            BlockReason::HashMismatch,
+        ));
+
+        // Use the Arc reference to poll.
+        let events = reader.poll_events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path(), "/bin/arc_test");
+    }
+
+    #[test]
+    fn mock_event_reader_push_after_poll_gives_new_events() {
+        let reader = MockEventReader::new();
+
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/a", BlockReason::Revoked));
+        let first = reader.poll_events().unwrap();
+        assert_eq!(first.len(), 1);
+
+        // Push more after consuming.
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/b", BlockReason::Revoked));
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/c", BlockReason::Revoked));
+        let second = reader.poll_events().unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].path(), "/bin/b");
+        assert_eq!(second[1].path(), "/bin/c");
+    }
+
+    #[test]
+    fn event_reader_trait_behind_arc_is_object_safe() {
+        use std::sync::Arc;
+
+        let reader = Arc::new(MockEventReader::new());
+        reader.push_event(BlockedExecutionEvent::for_test("/bin/obj", BlockReason::Revoked));
+
+        // Use as trait object behind Arc.
+        let trait_ref: Arc<dyn EventReader> = reader;
+        let events = trait_ref.poll_events().unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    // ── blocked_event_to_heartbeat_params edge cases ────────────────
+
+    #[test]
+    fn heartbeat_params_empty_path() {
+        let event = BlockedExecutionEvent::for_test("", BlockReason::Unknown);
+        let (_, _, _, resource, _) = blocked_event_to_heartbeat_params(&event, &test_verifier());
+        assert_eq!(resource, "");
+    }
+
+    #[test]
+    fn heartbeat_params_zero_hash() {
+        let event = BlockedExecutionEvent::for_test("/bin/test", BlockReason::Revoked);
+        let (_, _, _, _, sig_hash) = blocked_event_to_heartbeat_params(&event, &test_verifier());
+        assert_eq!(sig_hash, Blake3Hash::from([0u8; 32]));
+    }
+
+    #[test]
+    fn heartbeat_params_preserves_verifier_identity() {
+        let verifier = VerifierIdentity::new("kanshi", "node-42", "1.2.3");
+        let event = BlockedExecutionEvent::for_test("/bin/test", BlockReason::Revoked);
+        let (v, _, _, _, _) = blocked_event_to_heartbeat_params(&event, &verifier);
+        assert_eq!(v.component, "kanshi");
+        assert_eq!(v.instance, "node-42");
+        assert_eq!(v.version, "1.2.3");
+    }
 }

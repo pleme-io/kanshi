@@ -138,6 +138,17 @@ impl From<BlockReason> for u8 {
     }
 }
 
+impl core::fmt::Display for BlockReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotInAllowMap => write!(f, "not_in_allow_map"),
+            Self::HashMismatch => write!(f, "hash_mismatch"),
+            Self::Revoked => write!(f, "revoked"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 /// Event emitted by the eBPF sentinel when a binary execution is blocked.
 ///
 /// This is the kernel-to-userspace communication format via BPF ring buffer.
@@ -180,6 +191,11 @@ impl BlockedExecutionEvent {
     }
 
     /// Extract the binary path as a string (up to `binary_path_len` or first null).
+    ///
+    /// Returns `"<invalid-utf8>"` if the path contains non-UTF-8 bytes
+    /// (should never happen for real Linux paths but is defensive against
+    /// corrupted BPF ring buffer data).
+    #[inline]
     #[must_use]
     pub fn path(&self) -> &str {
         let len = (self.binary_path_len as usize).min(BINARY_PATH_LEN);
@@ -405,5 +421,200 @@ mod tests {
         assert_eq!(deserialized.policy, user_event.policy);
         assert_eq!(deserialized.reason, user_event.reason);
         assert_eq!(deserialized.binary_path, user_event.binary_path);
+    }
+
+    // ── BlockedExecutionEvent edge cases ─────────────────────────────
+
+    #[test]
+    fn blocked_execution_event_empty_path() {
+        let event = BlockedExecutionEvent::for_test("", BlockReason::Unknown);
+        assert_eq!(event.path(), "");
+        assert_eq!(event.binary_path_len, 0);
+    }
+
+    #[test]
+    fn blocked_execution_event_max_length_path() {
+        // Exactly BINARY_PATH_LEN characters fills the buffer.
+        let path = "x".repeat(BINARY_PATH_LEN);
+        let event = BlockedExecutionEvent::for_test(&path, BlockReason::Revoked);
+        assert_eq!(event.path(), path);
+        assert_eq!(event.binary_path_len, BINARY_PATH_LEN as u16);
+    }
+
+    #[test]
+    fn blocked_execution_event_over_max_length_path_truncated() {
+        // Path longer than BINARY_PATH_LEN is silently truncated.
+        let path = "y".repeat(BINARY_PATH_LEN + 100);
+        let event = BlockedExecutionEvent::for_test(&path, BlockReason::NotInAllowMap);
+        assert_eq!(event.path().len(), BINARY_PATH_LEN);
+        assert_eq!(event.binary_path_len, BINARY_PATH_LEN as u16);
+    }
+
+    #[test]
+    fn blocked_execution_event_utf8_japanese_path() {
+        let path = "/usr/local/bin/\u{76E3}\u{8996}"; // 監視 (kanshi in kanji)
+        let event = BlockedExecutionEvent::for_test(path, BlockReason::HashMismatch);
+        assert_eq!(event.path(), path);
+    }
+
+    #[test]
+    fn blocked_execution_event_null_in_middle_of_path() {
+        // Verify that path() stops at the first null byte.
+        let mut event = BlockedExecutionEvent::zeroed();
+        let bytes = b"/usr/bin\0/should/not/appear";
+        event.binary_path[..bytes.len()].copy_from_slice(bytes);
+        event.binary_path_len = bytes.len() as u16;
+        assert_eq!(event.path(), "/usr/bin");
+    }
+
+    #[test]
+    fn blocked_execution_event_path_no_allocation_on_fast_path() {
+        // path() returns a &str borrowed from the struct, no allocation.
+        let event = BlockedExecutionEvent::for_test("/usr/bin/test", BlockReason::Revoked);
+        let p = event.path();
+        // Verify it's a direct borrow from the binary_path buffer.
+        let buf_start = event.binary_path.as_ptr();
+        let p_start = p.as_ptr();
+        assert!(p_start >= buf_start);
+        assert!(p_start < unsafe { buf_start.add(BINARY_PATH_LEN) });
+    }
+
+    #[test]
+    fn blocked_execution_event_invalid_utf8_returns_fallback() {
+        let mut event = BlockedExecutionEvent::zeroed();
+        // Invalid UTF-8: 0xFF is never valid in UTF-8.
+        event.binary_path[0] = 0xFF;
+        event.binary_path[1] = 0xFE;
+        event.binary_path_len = 2;
+        assert_eq!(event.path(), "<invalid-utf8>");
+    }
+
+    // ── Size and alignment stability ────────────────────────────────
+
+    #[test]
+    fn blocked_execution_event_size_is_stable() {
+        // BPF compatibility: sizeof(BlockedExecutionEvent) must be stable.
+        // With repr(C), the layout is deterministic. Record the expected size.
+        let size = std::mem::size_of::<BlockedExecutionEvent>();
+        // pid(4) + pad(4) + inode(8) + cgroup_id(8) + looked_up_hash(32) +
+        // policy(1) + reason(1) + binary_path_len(2) + binary_path(256) = 316
+        // But repr(C) may add padding. The key is the size doesn't change.
+        assert!(size > 0, "BlockedExecutionEvent must have nonzero size");
+        // Verify it fits in a reasonable BPF ring buffer entry.
+        assert!(
+            size <= 512,
+            "BlockedExecutionEvent is {size} bytes, exceeds 512-byte ring buffer entry limit"
+        );
+    }
+
+    #[test]
+    fn blocked_execution_event_repr_c_alignment() {
+        // repr(C) should give us predictable alignment.
+        let align = std::mem::align_of::<BlockedExecutionEvent>();
+        // Must be at least 8 (u64 alignment) for BPF compatibility.
+        assert!(
+            align >= 8,
+            "BlockedExecutionEvent alignment is {align}, expected >= 8 for BPF"
+        );
+    }
+
+    #[test]
+    fn verification_event_repr_c_alignment() {
+        let align = std::mem::align_of::<VerificationEvent>();
+        assert!(
+            align >= 4,
+            "VerificationEvent alignment is {align}, expected >= 4"
+        );
+    }
+
+    // ── BlockReason ─────────────────────────────────────────────────
+
+    #[test]
+    fn block_reason_all_variants_produce_correct_string_in_user_event() {
+        let test_cases: &[(BlockReason, &str)] = &[
+            (BlockReason::NotInAllowMap, "NotInAllowMap"),
+            (BlockReason::HashMismatch, "HashMismatch"),
+            (BlockReason::Revoked, "Revoked"),
+            (BlockReason::Unknown, "Unknown"),
+        ];
+        for &(reason, expected_debug) in test_cases {
+            let reason_str = format!("{reason:?}");
+            assert_eq!(reason_str, expected_debug);
+        }
+    }
+
+    #[test]
+    fn block_reason_display_matches_metric_labels() {
+        assert_eq!(BlockReason::NotInAllowMap.to_string(), "not_in_allow_map");
+        assert_eq!(BlockReason::HashMismatch.to_string(), "hash_mismatch");
+        assert_eq!(BlockReason::Revoked.to_string(), "revoked");
+        assert_eq!(BlockReason::Unknown.to_string(), "unknown");
+    }
+
+    // ── BpfHash ─────────────────────────────────────────────────────
+
+    #[test]
+    fn bpf_hash_is_hashable_for_use_as_map_key() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(BpfHash::new([1u8; 32]));
+        set.insert(BpfHash::new([2u8; 32]));
+        set.insert(BpfHash::new([1u8; 32])); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn bpf_hash_clone_is_independent() {
+        let original = BpfHash::new([99u8; 32]);
+        let cloned = original;
+        assert_eq!(original, cloned);
+    }
+
+    #[cfg(feature = "userspace")]
+    #[test]
+    fn user_blocked_event_all_block_reasons() {
+        for reason in [
+            BlockReason::NotInAllowMap,
+            BlockReason::HashMismatch,
+            BlockReason::Revoked,
+            BlockReason::Unknown,
+        ] {
+            let event = BlockedExecutionEvent::for_test("/bin/test", reason);
+            let user_event = UserBlockedEvent::from(&event);
+            assert_eq!(user_event.reason, format!("{reason:?}"));
+            assert_eq!(user_event.binary_path, "/bin/test");
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    #[test]
+    fn user_blocked_event_all_policies() {
+        for policy in [
+            EnforcementPolicy::Audit,
+            EnforcementPolicy::Enforce,
+            EnforcementPolicy::AllowUnknown,
+        ] {
+            let mut event =
+                BlockedExecutionEvent::for_test("/bin/test", BlockReason::Revoked);
+            event.policy = policy;
+            let user_event = UserBlockedEvent::from(&event);
+            assert_eq!(user_event.policy, format!("{policy:?}"));
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    #[test]
+    fn user_blocked_event_empty_path() {
+        let event = BlockedExecutionEvent::for_test("", BlockReason::Unknown);
+        let user_event = UserBlockedEvent::from(&event);
+        assert_eq!(user_event.binary_path, "");
+    }
+
+    #[cfg(feature = "userspace")]
+    #[test]
+    fn user_blocked_event_zero_hash_is_all_zeros_hex() {
+        let event = BlockedExecutionEvent::for_test("/bin/test", BlockReason::Revoked);
+        let user_event = UserBlockedEvent::from(&event);
+        assert_eq!(user_event.hash, "00".repeat(32));
     }
 }

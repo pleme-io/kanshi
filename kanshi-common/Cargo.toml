@@ -1,0 +1,19 @@
+[package]
+name = "kanshi-common"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+authors = ["Pleme Team <team@pleme.io>"]
+description = "Shared types between kanshi userspace and eBPF programs"
+license = "MIT"
+
+[features]
+default = []
+# Enable userspace-only dependencies (serde, etc.)
+userspace = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[lints.clippy]
+pedantic = "warn"

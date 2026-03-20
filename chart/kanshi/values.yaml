@@ -1,0 +1,70 @@
+# kanshi — eBPF runtime integrity sentinel
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/pleme-io/kanshi
+  pullPolicy: IfNotPresent
+  tag: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Enforcement mode: audit | enforce
+enforcement:
+  mode: audit
+  defaultPolicy: audit
+
+# BPF map sizes
+maps:
+  allowMapSize: 1048576    # 2^20
+  revocationMapSize: 65536 # 2^16
+  policyMapSize: 4096
+
+# Health server
+health:
+  port: 8081
+
+# Metrics
+metrics:
+  enabled: true
+  port: 9090
+
+# Heartbeat chain
+heartbeat:
+  enabled: false
+  emitter: noop
+
+# Resource limits (kanshi needs elevated privileges for eBPF)
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Security context for eBPF program loading
+securityContext:
+  privileged: false
+  capabilities:
+    add:
+      - SYS_ADMIN     # Required for BPF program loading
+      - SYS_RESOURCE  # Required for BPF map creation
+      - NET_ADMIN     # Required for Cilium integration
+
+# Node selector (Linux only — eBPF not available on other OSes)
+nodeSelector:
+  kubernetes.io/os: linux
+
+tolerations:
+  - operator: Exists
+    effect: NoSchedule
+
+# ServiceMonitor for Prometheus Operator
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}

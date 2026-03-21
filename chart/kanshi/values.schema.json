@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Kanshi Helm Values",
+  "description": "JSON Schema for kanshi Helm chart values",
+  "type": "object",
+  "required": [
+    "image",
+    "enforcement",
+    "maps",
+    "health",
+    "metrics",
+    "resources"
+  ],
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of DaemonSet replicas (unused for DaemonSet, kept for compatibility)"
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository", "pullPolicy"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Container image repository"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Image pull policy"
+        },
+        "tag": {
+          "type": "string",
+          "description": "Image tag (defaults to chart appVersion)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "Create a ServiceAccount"
+        },
+        "name": {
+          "type": "string",
+          "description": "ServiceAccount name (defaults to fullname)"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Annotations for the ServiceAccount"
+        }
+      },
+      "additionalProperties": false
+    },
+    "nameOverride": {
+      "type": "string",
+      "description": "Override the chart name"
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "description": "Override the full release name"
+    },
+    "enforcement": {
+      "type": "object",
+      "required": ["mode", "defaultPolicy"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["audit", "enforce"],
+          "description": "Enforcement mode"
+        },
+        "defaultPolicy": {
+          "type": "string",
+          "enum": ["audit", "enforce"],
+          "description": "Default policy for namespaces without explicit policy"
+        }
+      },
+      "additionalProperties": false
+    },
+    "maps": {
+      "type": "object",
+      "required": ["allowMapSize", "revocationMapSize", "policyMapSize"],
+      "properties": {
+        "allowMapSize": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "BPF allow map size (number of entries)"
+        },
+        "revocationMapSize": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "BPF revocation map size (number of entries)"
+        },
+        "policyMapSize": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "BPF policy map size (number of entries)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "health": {
+      "type": "object",
+      "required": ["port"],
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Health check port"
+        }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["enabled", "port"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable Prometheus metrics"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Metrics port"
+        }
+      },
+      "additionalProperties": false
+    },
+    "heartbeat": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable heartbeat chain"
+        },
+        "emitter": {
+          "type": "string",
+          "description": "Heartbeat emitter type"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": "string",
+              "description": "CPU request"
+            },
+            "memory": {
+              "type": "string",
+              "description": "Memory request"
+            }
+          },
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": "string",
+              "description": "CPU limit"
+            },
+            "memory": {
+              "type": "string",
+              "description": "Memory limit"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "securityContext": {
+      "type": "object",
+      "properties": {
+        "privileged": {
+          "type": "boolean",
+          "description": "Run container in privileged mode"
+        },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "add": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Linux capabilities to add"
+            },
+            "drop": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Linux capabilities to drop"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "properties": {
+        "runAsNonRoot": {
+          "type": "boolean"
+        },
+        "runAsUser": {
+          "type": "integer"
+        },
+        "runAsGroup": {
+          "type": "integer"
+        },
+        "fsGroup": {
+          "type": "integer"
+        }
+      },
+      "description": "Pod security context"
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Node selector"
+    },
+    "tolerations": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Tolerations"
+    },
+    "affinity": {
+      "type": "object",
+      "description": "Affinity rules"
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable ServiceMonitor creation"
+        },
+        "interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h)$",
+          "description": "Scrape interval"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Additional labels for ServiceMonitor"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

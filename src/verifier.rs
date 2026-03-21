@@ -14,9 +14,28 @@ pub trait HashValidator: Send + Sync {
 }
 
 /// Verifier that checks binary hashes against the allow map.
+///
+/// # SECURITY: Inode-Based vs Content-Hash Verification
+///
+/// Inode-based lookup (via [`verify`](HashValidator::verify)) is a performance
+/// optimization that avoids re-hashing the binary on every `execve()`.
+/// The ACTUAL security boundary is the content hash comparison: even if an
+/// inode is reused (e.g., file deleted and new file created with same inode),
+/// the content hash will differ for a different binary, causing verification
+/// to fail with [`VerifyResult::Mismatch`] in Enforce mode.
+///
+/// In Audit and AllowUnknown modes, inode reuse is logged as a security event
+/// but does not prevent execution. Production deployments MUST use Enforce
+/// mode for security guarantees.
+///
+/// For inode-reuse-immune verification, use [`verify_by_hash`](HashVerifier::verify_by_hash)
+/// which checks the content hash directly against the allow set, bypassing
+/// inode lookup entirely.
 pub struct HashVerifier {
     allow_map: std::collections::HashMap<u64, BpfHash>,
     revocation_map: std::collections::HashSet<BpfHash>,
+    /// Content-hash-based allow set for inode-independent verification.
+    allow_set: std::collections::HashSet<BpfHash>,
 }
 
 impl HashVerifier {
@@ -26,11 +45,16 @@ impl HashVerifier {
         Self {
             allow_map: std::collections::HashMap::new(),
             revocation_map: std::collections::HashSet::new(),
+            allow_set: std::collections::HashSet::new(),
         }
     }
 
     /// Add an allowed hash for an inode.
+    ///
+    /// Also adds the hash to the content-based allow set for
+    /// [`verify_by_hash`](Self::verify_by_hash) lookups.
     pub fn allow(&mut self, inode: u64, hash: BpfHash) {
+        self.allow_set.insert(hash);
         self.allow_map.insert(inode, hash);
     }
 
@@ -47,6 +71,23 @@ impl HashVerifier {
     /// Remove a hash from the revocation list.
     pub fn unrevoke(&mut self, hash: &BpfHash) {
         self.revocation_map.remove(hash);
+    }
+
+    /// Verify a binary by its content hash directly (no inode lookup).
+    ///
+    /// This is the secure path — immune to inode reuse attacks.
+    /// Checks the hash against the revocation list first, then the
+    /// content-based allow set.
+    #[inline]
+    #[must_use]
+    pub fn verify_by_hash(&self, hash: &BpfHash) -> VerifyResult {
+        if self.revocation_map.contains(hash) {
+            return VerifyResult::Revoked;
+        }
+        if self.allow_set.contains(hash) {
+            return VerifyResult::Allowed;
+        }
+        VerifyResult::Unknown
     }
 
     /// Convert a tameshi `Blake3Hash` to a `BpfHash`.
@@ -205,5 +246,54 @@ mod tests {
         let v = HashVerifier::default();
         assert_eq!(v.allow_count(), 0);
         assert_eq!(v.revocation_count(), 0);
+    }
+
+    // =========================================================================
+    // Content-hash-based verification (inode-reuse-immune)
+    // =========================================================================
+
+    #[test]
+    fn verify_by_hash_allowed() {
+        let mut v = HashVerifier::new();
+        let hash = test_hash(10);
+        v.allow(200, hash);
+        assert_eq!(v.verify_by_hash(&test_hash(10)), VerifyResult::Allowed);
+    }
+
+    #[test]
+    fn verify_by_hash_revoked() {
+        let mut v = HashVerifier::new();
+        let hash = test_hash(20);
+        v.revoke(hash);
+        assert_eq!(v.verify_by_hash(&test_hash(20)), VerifyResult::Revoked);
+    }
+
+    #[test]
+    fn verify_by_hash_unknown() {
+        let v = HashVerifier::new();
+        assert_eq!(v.verify_by_hash(&test_hash(99)), VerifyResult::Unknown);
+    }
+
+    #[test]
+    fn verify_by_hash_revocation_takes_priority() {
+        let mut v = HashVerifier::new();
+        let hash = test_hash(30);
+        v.allow(300, hash);
+        v.revoke(test_hash(30));
+        // Hash is in both allow_set and revocation_map — revocation wins.
+        assert_eq!(v.verify_by_hash(&test_hash(30)), VerifyResult::Revoked);
+    }
+
+    #[test]
+    fn inode_reuse_with_different_hash_detected() {
+        let mut v = HashVerifier::new();
+        let hash_h1 = test_hash(40);
+        let hash_h2 = test_hash(41);
+        let inode = 400;
+        // Add inode with hash H1
+        v.allow(inode, hash_h1);
+        assert_eq!(v.verify(inode, &hash_h1), VerifyResult::Allowed);
+        // Same inode, different hash H2 → Mismatch (inode reuse detected)
+        assert_eq!(v.verify(inode, &hash_h2), VerifyResult::Mismatch);
     }
 }

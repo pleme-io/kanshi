@@ -66,6 +66,47 @@ pub trait BpfLoader: Send + Sync {
     fn revocation_count(&self) -> usize;
 }
 
+/// Check if the current platform supports BPF LSM hooks.
+///
+/// Returns `Ok(true)` if LSM BPF is available, `Ok(false)` if not,
+/// or `Err` if the check itself fails.
+///
+/// On macOS, always returns `Ok(false)`.
+#[must_use]
+pub fn check_lsm_support() -> Result<bool, Error> {
+    #[cfg(target_os = "linux")]
+    {
+        // Check /sys/kernel/security/lsm for "bpf"
+        match std::fs::read_to_string("/sys/kernel/security/lsm") {
+            Ok(lsm) => Ok(lsm.contains("bpf")),
+            Err(e) => Err(Error::Bpf(format!("cannot read LSM config: {e}"))),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(false)
+    }
+}
+
+/// SECURITY: Fail-secure policy.
+///
+/// If BPF LSM is not available and enforcement mode is `Enforce`,
+/// ALL executions should be denied. This prevents a silent security
+/// downgrade where kanshi appears to be running but isn't actually
+/// enforcing anything.
+pub fn enforce_or_fail(lsm_available: bool, policy: EnforcementPolicy) -> Result<(), Error> {
+    if policy == EnforcementPolicy::Enforce && !lsm_available {
+        Err(Error::Bpf(
+            "SECURITY: Enforce mode requires BPF LSM but it is not available. \
+             Refusing to run in degraded mode. Either enable CONFIG_BPF_LSM=y \
+             in the kernel or switch to Audit mode."
+                .to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Real aya-based BPF program loader.
 ///
 /// Loads the compiled eBPF object, attaches LSM hooks, and provides
@@ -496,5 +537,54 @@ mod tests {
             .with_fail_on_load();
         // set_policy should still work.
         assert!(loader.set_policy(42, EnforcementPolicy::Enforce).is_ok());
+    }
+
+    // =========================================================================
+    // LSM support check and fail-secure policy
+    // =========================================================================
+
+    #[test]
+    fn check_lsm_support_returns_false_on_macos() {
+        // On non-Linux platforms (including macOS where tests run),
+        // check_lsm_support must return Ok(false).
+        #[cfg(not(target_os = "linux"))]
+        {
+            let result = check_lsm_support();
+            assert!(result.is_ok());
+            assert!(
+                !result.unwrap(),
+                "LSM BPF should not be available on non-Linux platforms"
+            );
+        }
+    }
+
+    #[test]
+    fn enforce_or_fail_denies_without_lsm() {
+        // Enforce mode + no LSM available = hard error (fail-secure).
+        let result = enforce_or_fail(false, EnforcementPolicy::Enforce);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("SECURITY"),
+            "Error should mention SECURITY: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("Enforce mode requires BPF LSM"),
+            "Error should explain the requirement: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn enforce_or_fail_allows_audit_without_lsm() {
+        // Audit mode + no LSM available = OK (log-only is acceptable).
+        let result = enforce_or_fail(false, EnforcementPolicy::Audit);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn enforce_or_fail_allows_with_lsm() {
+        // Enforce mode + LSM available = OK (full enforcement possible).
+        let result = enforce_or_fail(true, EnforcementPolicy::Enforce);
+        assert!(result.is_ok());
     }
 }

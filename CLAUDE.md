@@ -313,3 +313,13 @@ kanshi is the last mile: after a deployment passes all gates (inshou, sekiban), 
 | const-hex | Hex encode/decode |
 | chrono | Timestamps |
 | serde + serde_json | Serialization |
+
+## Helm Chart
+
+No flake.nix -- run helm commands directly:
+
+```bash
+helm lint chart/kanshi
+helm template test chart/kanshi
+helm package chart/kanshi
+```

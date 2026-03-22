@@ -25,6 +25,7 @@ pub mod crd_watcher;
 pub mod error;
 pub mod event_metrics;
 pub mod event_reader;
+pub mod forensics_writer;
 pub mod health;
 pub mod metrics;
 pub mod policy;

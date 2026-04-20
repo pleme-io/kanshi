@@ -1192,7 +1192,6 @@ dependencies = [
  "axum",
  "chrono",
  "const-hex",
- "figment",
  "k8s-openapi",
  "kanshi-common",
  "kube",

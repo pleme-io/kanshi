@@ -1,5 +1,8 @@
 # kanshi -- eBPF runtime integrity sentinel
 
+> **★★★ CSE / Knowable Construction.** This repo operates under **Constructive Substrate Engineering** — canonical specification at [`pleme-io/theory/CONSTRUCTIVE-SUBSTRATE-ENGINEERING.md`](https://github.com/pleme-io/theory/blob/main/CONSTRUCTIVE-SUBSTRATE-ENGINEERING.md). The Compounding Directive (operational rules: solve once, load-bearing fixes only, idiom-first, models stay current, direction beats velocity) is in the org-level pleme-io/CLAUDE.md ★★★ section. Read both before non-trivial changes.
+
+
 eBPF-based runtime binary verification daemon. Pillars 3 and 4 of the Unified Theory of Infrastructure Proof: runtime binary verification (Pillar 3) and continuous monitoring with regulatory evidence generation (Pillar 4). Uses LSM hooks to verify binary integrity at execution time. Watches tameshi SignatureGate CRDs and populates BPF hash maps. Edition 2024, Rust 1.89.0, MIT.
 
 ## Build
